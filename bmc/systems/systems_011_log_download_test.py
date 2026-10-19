@@ -140,9 +140,12 @@ class LogDownloadTest(BmcTestBase):
         CommonFunction.print_log("INFO", "Step 1：尝试标准 Redfish 一键日志接口（SDK collect_and_download_diagnostic_data）")
         standard_ok = False
         try:
-            self.client.collect_and_download_diagnostic_data(
-                diagnostic_data_type=self.STANDARD_BODY.get("DiagnosticDataType", "Manager"),
+            downloaded_path = self.client.collect_and_download_diagnostic_data(
+                output_path=os.path.join(self.LOG_DIR, "diagnostic_bundle.tar"),
+                diagnostic_data_type=self.STANDARD_BODY.get("DiagnosticDataType"),
             )
+            if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) == 0:
+                raise RuntimeError(f"下载的日志文件不存在或为空：{downloaded_path}")
             standard_ok = True
         except RedfishException as e:
             CommonFunction.print_log("INFO", f"[标准接口] SDK 调用失败：{str(e)[:200]}")

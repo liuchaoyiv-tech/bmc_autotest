@@ -7,7 +7,7 @@
         "UserName": "",
         "PassWord": "",
         "StandardBody": {
-            "DiagnosticDataType": "Manager"
+            "DiagnosticDataType": null
         },
         "Custom": {
             "Enabled": true,
@@ -25,7 +25,7 @@
         "UserName": "",
         "PassWord": "",
         "StandardBody": {
-            "DiagnosticDataType": "Manager"
+            "DiagnosticDataType": null
         },
         "Custom": {
             "Enabled": true,
