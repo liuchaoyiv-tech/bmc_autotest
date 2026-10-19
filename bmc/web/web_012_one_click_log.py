@@ -2,15 +2,16 @@
 """
 BMC Web一键日志收集（Web_012）
 2026/10/16: SDK 1.3.0 适配 - 硬编码 URI 改为 SDK/ServiceRoot 动态发现（issue/8）
-RDSV_BMC_131 - 触发一键日志收集接口
+2026/10/19: 使用 SDK 完成新日志采集、等待和下载，校验文件后判定结果
+RDSV_BMC_131 - 验证一键日志收集与下载功能（不验证浏览器页面交互）
 
-Usage: python3 -m bmc.web_012_one_click_log -i <bmc_ip> -u <user> -p <pass>
+Usage: python3 bmc/web/web_012_one_click_log.py -i <bmc_ip> -u <user> -p <pass>
 """
 import os, sys, time, traceback
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 from func.common_function import CommonFunction
 from func.bmc_web_test_base import BmcWebTestBase
-from func.web_client import BmcWebClient
+from redfish_sdk import RedfishClient
 
 
 class WebOneClickLog(BmcWebTestBase):
@@ -23,60 +24,23 @@ class WebOneClickLog(BmcWebTestBase):
     def run(self):
         test = CommonFunction()
         steps = [];  all_pass = True
-        client = BmcWebClient(self.BMC_IP, self.USERNAME, self.PASSWORD, self.TIMEOUT)
-        if not client.login():
-            self._rec(steps, all_pass, 'login', False, '登录失败')
-            self.command_check_result = 'FAIL'
-            self._save(test, steps);  return
+        try:
+            # 由 SDK 识别厂商并处理采集参数、任务等待及下载；每次触发新采集。
+            with RedfishClient(self.BMC_IP, self.USERNAME, self.PASSWORD,
+                               read_timeout=self.TIMEOUT) as client:
+                saved_path = client.collect_and_download_diagnostic_data(
+                    output_path=os.path.join(self.LOG_DIR, 'diagnostic_bundle.tar'),
+                    reuse_existing=False,
+                )
+                if not os.path.isfile(saved_path) or os.path.getsize(saved_path) == 0:
+                    raise RuntimeError(f'下载的日志文件不存在或为空：{saved_path}')
+                file_size = os.path.getsize(saved_path)
+            all_pass = self._rec(steps, all_pass, 'one_click_log_sdk', True,
+                f'采集下载成功，文件={saved_path}，大小={file_size} bytes')
+        except Exception as e:
+            all_pass = self._rec(steps, all_pass, 'one_click_log_sdk', False,
+                f'{type(e).__name__}: {e}')
 
-        # 一键日志 Action URI：conf 显式配置优先，否则从 Manager 的 LogServices
-        # 成员 Actions 元数据动态发现（LogServices.Dump / LogService.ExportLogs）
-        std_uri = self.conf.get('StandardActionUri', '')
-        oem_uri = self.conf.get('CustomActionUri', '')
-        if not std_uri or not oem_uri:
-            ls_uri = self._redfish_uri('log_services_manager')
-            if ls_uri:
-                client2 = BmcWebClient(self.BMC_IP, self.USERNAME, self.PASSWORD, self.TIMEOUT)
-                code_ls, body_ls = client2.get(ls_uri)
-                members = body_ls.get('Members', []) if isinstance(body_ls, dict) else []
-                for m in members:
-                    href = m.get('@odata.id', '')
-                    if not href:
-                        continue
-                    _, svc_body = client2.get(href)
-                    if not isinstance(svc_body, dict):
-                        continue
-                    actions = svc_body.get('Actions', {}) or {}
-                    for k, v in actions.items():
-                        if not isinstance(v, dict):
-                            continue
-                        target = v.get('target', '')
-                        if not target:
-                            continue
-                        if 'Dump' in k and not std_uri:
-                            std_uri = target
-                        if 'ExportLogs' in k and not oem_uri:
-                            oem_uri = target
-                client2.logout()
-        body_payload = self.conf.get('ActionBody', {})
-
-        # 先试标准接口
-        code, body = client.post(std_uri, body_payload)
-        if code in (200, 202, 204):
-            all_pass = self._rec(steps, all_pass, 'one_click_log_standard', True,
-                f'HTTP={code}（标准接口成功）')
-        else:
-            steps.append(('one_click_log_standard', 'WARNING', f'HTTP={code}，尝试OEM接口'))
-            # 试 OEM 接口
-            code2, body2 = client.post(oem_uri, body_payload)
-            if code2 in (200, 202, 204):
-                all_pass = self._rec(steps, all_pass, 'one_click_log_oem', True,
-                    f'HTTP={code2}（OEM接口成功）')
-            else:
-                all_pass = self._rec(steps, all_pass, 'one_click_log_oem', False,
-                    f'标准={code}，OEM={code2}')
-
-        client.logout()
         self.command_check_result = 'PASS' if all_pass else 'FAIL'
         self._save(test, steps)
 
