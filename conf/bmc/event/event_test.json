@@ -31,9 +31,7 @@
         "LogBasename": "event_004_get_subscription",
         "BMC_IP": "",
         "UserName": "",
-        "PassWord": "",
-        "TestSubDestination": "https://192.0.2.99:9999/test",
-        "TestSubContext": "xhs_test_sub_do_not_keep"
+        "PassWord": ""
     },
     "Event006DeleteSubscription": {
         "TestName": "EventService 订阅删除",
@@ -52,11 +50,9 @@
         "BMC_IP": "",
         "UserName": "",
         "PassWord": "",
-        "TestSubDestination": "",
-        "TestSubContext": "xhs_test_event_do_not_keep",
+        "EventTypes": ["StatusChange", "ResourceUpdated", "ResourceAdded", "ResourceRemoved", "Alert"],
         "TestMessageId": "",
-        "TestMessageArgs": [],
-        "TaskTimeout": 60
+        "TestMessageArgs": []
     },
     "Event010SubmitEventNegative": {
         "TestName": "EventService 测试事件上报（反向）",

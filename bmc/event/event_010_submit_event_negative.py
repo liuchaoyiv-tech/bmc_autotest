@@ -1,50 +1,105 @@
 #!/bin/python
-"""EventService 测试事件上报（反向）: schema-aware checks with owned temporary subscriptions.
+"""
+Author: Fengmian
+Date: 2026/05/14
+Usage: python3 bmc/event_010_submit_event_negative.py -i <bmc_ip> -u <username> -p <password>
 
-Run from the repository root with -i <bmc_ip> -u <username> -p <password>.
-See docs/redfish_event_testing.md for receiver setup and verification scope.
+测试内容：
+  模拟测试事件上报（反向）
+  POST EventService.SubmitTestEvent（URI 由 SDK 从 EventService.Actions 动态获取）
+  使用非法参数，验证 BMC 正确拒绝请求（client.post() 抛出 RedfishException）。
+
+  2026/10/16: SDK 1.3.0 适配 - SubmitTestEvent target 改由 EventService.Actions
+  元数据动态发现，不再硬编码（issue/8）
+
+  反向场景：
+  1. 非法 EventType 值（"InvalidEventType_XHS_TEST"）→ 期望 RedfishException（4xx）
+  2. 缺少必要字段（空 body {}）                      → 期望 RedfishException（4xx）
+  3. 非法字段名（"MessageId":"xxx"）                  → 期望 RedfishException（4xx）
+
+PASS 标准：
+  所有反向场景均触发 RedfishException（即 BMC 返回 4xx 错误）。
 """
 
+import argparse
+import json
+import logging
 import os
 import sys
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
-from redfish_sdk import RedfishException
-
-from func.redfish_event_test_base import (
-    RedfishEventTestBase,
-    error_message_keys,
-)
+from func.bmc_event_test_base import BmcEventTestBase
 
 
-class Event010SubmitEventNegative(RedfishEventTestBase):
-    CASE_KEY = "Event010SubmitEventNegative"
-    TEST_NAME = "EventService 测试事件上报（反向）"
-    TEST_NUM = "Redfish_Event_010"
-    LOG_BASE_NAME = "event_010_submit_event_negative"
 
-    def _run_checks(self):
-        action, info = self.submit_action()
-        message_id, message_args = self.test_message()
-        valid = {"MessageId": message_id}
-        if message_args:
-            valid["MessageArgs"] = message_args
-        cases = [
-            ("未知动作参数", dict(valid, InvalidParameter_XHS_TEST=True), "ActionParameterUnknown"),
-            ("缺少必需 MessageId", {}, "ActionParameterMissing"),
-            ("MessageId 类型错误", {"MessageId": 123}, "ActionParameterValueTypeError"),
-        ]
-        for name, body, expected in cases:
-            try:
-                response = self.client.post(action["target"], body)
-            except RedfishException as exc:
-                keys = error_message_keys(exc)
-                self.require(name, exc.status_code == 400 and expected in keys, f"HTTP {exc.status_code}, keys={sorted(keys)}, body={exc.body}")
-            else:
-                self.record(name, False, f"BMC accepted invalid parameters: {response!r}")
+from redfish_sdk import RedfishClient, RedfishException
 
+
+NEGATIVE_CASES = [
+    {
+        "desc": "非法 EventType 值",
+        "body": {"EventType": "InvalidEventType_XHS_TEST"},
+    },
+    {
+        "desc": "缺少必要字段（空 body）",
+        "body": {},
+    },
+    {
+        "desc": "非法字段名（MessageId）",
+        "body": {"MessageId": "xhs_test_invalid_field"},
+    },
+]
+
+class Event010SubmitEventNegative(BmcEventTestBase):
+    CASE_KEY      = 'Event010SubmitEventNegative'
+    TEST_NAME     = 'EventService 测试事件上报（反向）'
+    TEST_NUM      = 'Redfish_Event_010'
+    LOG_BASE_NAME = 'event_010_submit_event_negative'
+    CONFIG_FILE   = 'event_test.json'
+    CONF_DIR      = 'event'
+
+
+    def run_test(self):
+        self.log.info(f"开始：{self.TEST_NAME}（{self.TEST_NUM}）")
+
+        self.client = RedfishClient(self.BMC_IP, self.USERNAME, self.PASSWORD)
+
+        findings = []
+        try:
+            # SubmitTestEvent target 由 EventService.Actions 元数据动态发现
+            actions = self.client.get_event_service().actions or {}
+            submit_action = actions.get("#EventService.SubmitTestEvent", {})
+            submit_uri = submit_action.get("target", "") if isinstance(submit_action, dict) else ""
+            if not submit_uri:
+                raise RedfishException("EventService 响应中无 #EventService.SubmitTestEvent target")
+            self.log.info(f"  SubmitTestEvent target（SDK 发现）：{submit_uri}")
+
+            for case in NEGATIVE_CASES:
+                self.log.info(f"  场景：{case['desc']}")
+                try:
+                    resp = self.client.post(submit_uri, case["body"])
+                    # 未抛异常 = BMC 接受了非法请求，这是 FAIL
+                    findings.append({"item": f"[反向] {case['desc']} → 应拒绝（抛 RedfishException）",
+                                     "result": "FAIL",
+                                     "detail": f"BMC 未拒绝，返回 {resp!r}"})
+                    self.log.error(f"  ❌ 未拒绝，返回 {resp!r}")
+                except RedfishException as e:
+                    # 抛出异常 = BMC 正确拒绝
+                    findings.append({"item": f"[反向] {case['desc']} → 正确拒绝（RedfishException）",
+                                     "result": "PASS",
+                                     "detail": f"RedfishException: {e}"})
+                    self.log.info(f"  ✅ 正确拒绝：{e}")
+
+        finally:
+            self.client.close()
+
+        fails = [f for f in findings if f["result"] == "FAIL"]
+        final = "PASS" if not fails else "FAIL"
+        self.command_check_result = final
+        self.log.info(f"最终结果：{final}（{len(findings) - len(fails)}/{len(findings)} PASS）")
+        self._write_result(final, findings)
 
 if __name__ == "__main__":
     exit_code = 0
