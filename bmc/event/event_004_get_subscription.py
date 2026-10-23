@@ -7,7 +7,7 @@ Usage: python3 bmc/event_004_get_subscription.py -i <bmc_ip> -u <username> -p <p
 
 测试内容：
   查询单个事件订阅资源（GET /redfish/v1/EventService/Subscriptions/{id}）
-  验证响应字段完整性。使用当前已存在的第一个订阅（无需创建）。
+  验证响应字段完整性。优先查询已有订阅；为空时自动创建并清理临时订阅。
 
   SDK 用法（v1.1.1）：
   - client.get_subscriptions() 返回 List[Subscription]，取第一个获取 ID
@@ -24,11 +24,12 @@ import logging
 import os
 import sys
 import traceback
+import uuid
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from func.bmc_event_test_base import BmcEventTestBase
-from func.redfish_event_compat import modern_event_destination
+from func.redfish_event_compat import modern_event_destination, subscription_event_types
 
 from redfish_sdk import RedfishClient, RedfishException
 
@@ -52,6 +53,22 @@ class Event004GetSubscription(BmcEventTestBase):
     CONFIG_FILE   = 'event_test.json'
     CONF_DIR      = 'event'
 
+    def _load_extra_config(self, conf):
+        self.test_sub_dest = conf.get("TestSubDestination", "https://192.0.2.99:9999/test")
+        self.test_sub_context = conf.get("TestSubContext", "xhs_query_test_sub_do_not_keep")
+
+    def _temporary_subscription_uris(self, collection_uri, context):
+        """Identify only resources created for this run, including partial POSTs."""
+        collection = self.client.get_raw(collection_uri)
+        matches = []
+        for member in collection["Members"]:
+            uri = member["@odata.id"]
+            if not uri.startswith(collection_uri + "/"):
+                continue
+            resource = self.client.get_raw(uri)
+            if resource.get("Context") == context and resource.get("Destination") == self.test_sub_dest:
+                matches.append(uri)
+        return matches
 
     def run_test(self):
         self.log.info(f"开始：{self.TEST_NAME}（{self.TEST_NUM}）")
@@ -59,6 +76,8 @@ class Event004GetSubscription(BmcEventTestBase):
         self.client = RedfishClient(self.BMC_IP, self.USERNAME, self.PASSWORD)
 
         findings = []
+        temporary_context = None
+        collection_uri = None
         try:
             # 先获取订阅列表，取第一个订阅的 ID
             subs = self.client.get_subscriptions()
@@ -68,18 +87,33 @@ class Event004GetSubscription(BmcEventTestBase):
             self.log.info(f"  SDK get_subscriptions() → {len(subs)} 条")
 
             if not subs:
-                findings.append({"item": "前置：当前存在至少一个订阅", "result": "FAIL",
-                                 "detail": "get_subscriptions() 返回空列表，无法执行查询测试"})
-                self.log.error("❌ 无任何订阅，无法执行测试")
-                self._write_result("FAIL", findings)
-                return
-
-            # 取第一个订阅的 ID，用 get_subscription() 直接查询（v1.1.1 新增）
-            first_sub = subs[0]
-            sub_id = first_sub.id if first_sub.id else first_sub.odata_id
+                # 自动补齐原查询用例的前置条件，使用唯一 Context 标记归属。
+                service = self.client.get_event_service()
+                collection_uri = service.subscriptions.odata_id.rstrip("/")
+                temporary_context = f"{self.test_sub_context}_{uuid.uuid4().hex}"
+                created = self.client.subscribe(
+                    self.test_sub_dest, subscription_event_types(self.client), temporary_context
+                )
+                sub_id = created.odata_id
+                if not sub_id or not sub_id.startswith(collection_uri + "/"):
+                    matches = self._temporary_subscription_uris(collection_uri, temporary_context)
+                    if len(matches) != 1:
+                        raise ValueError("无法确定临时订阅 URI")
+                    sub_id = matches[0]
+                findings.append({"item": "前置：自动创建临时订阅", "result": "PASS",
+                                 "detail": sub_id})
+                self.log.info(f"  自动创建临时订阅：{sub_id}")
+            else:
+                # 已有订阅时保持原来的只读查询流程。
+                first_sub = subs[0]
+                sub_id = first_sub.id if first_sub.id else first_sub.odata_id
             self.log.info(f"  使用订阅 ID：{sub_id!r}")
 
             sub = self.client.get_subscription(sub_id)
+            if temporary_context and (
+                sub.context != temporary_context or sub.destination != self.test_sub_dest
+            ):
+                raise ValueError("查询结果与本次创建的临时订阅不匹配")
             self.log.info(f"  使用订阅 URI：{sub.odata_id!r}")
 
             findings.append({"item": f"GET Subscription 返回有效对象",
@@ -111,7 +145,24 @@ class Event004GetSubscription(BmcEventTestBase):
             findings.append({"item": "GET Subscription", "result": "FAIL",
                              "detail": f"RedfishException: {e}"})
             self.log.error(f"❌ RedfishException: {e}")
+        except Exception as e:
+            findings.append({"item": "GET Subscription", "result": "FAIL", "detail": str(e)})
+            self.log.error(f"❌ {e}")
         finally:
+            if temporary_context:
+                try:
+                    # 即使 POST 已创建资源但 SDK 解析失败，也只清理归属本次的订阅。
+                    for uri in self._temporary_subscription_uris(collection_uri, temporary_context):
+                        self.client.delete_subscription(uri)
+                    remaining = self._temporary_subscription_uris(collection_uri, temporary_context)
+                    if remaining:
+                        raise ValueError(f"临时订阅清理后仍存在：{remaining}")
+                    findings.append({"item": "清理本次临时订阅", "result": "PASS",
+                                     "detail": "本次临时订阅已清理"})
+                    self.log.info("  本次临时订阅已清理")
+                except Exception as e:
+                    findings.append({"item": "清理本次临时订阅", "result": "FAIL", "detail": str(e)})
+                    self.log.error(f"❌ 临时订阅清理失败：{e}")
             self.client.close()
 
         fails = [f for f in findings if f["result"] == "FAIL"]

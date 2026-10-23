@@ -31,7 +31,9 @@
         "LogBasename": "event_004_get_subscription",
         "BMC_IP": "",
         "UserName": "",
-        "PassWord": ""
+        "PassWord": "",
+        "TestSubDestination": "https://192.0.2.99:9999/test",
+        "TestSubContext": "xhs_query_test_sub_do_not_keep"
     },
     "Event006DeleteSubscription": {
         "TestName": "EventService 订阅删除",

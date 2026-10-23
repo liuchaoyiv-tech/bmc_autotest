@@ -54,7 +54,7 @@ class FakeBmc:
             "@odata.id": uri, "Id": "test", "Context": context, "Destination": destination,
             "@odata.type": "#EventDestination.v1_13_0.EventDestination", "Protocol": "Redfish",
         }
-        return self.get_subscription(uri)
+        return Subscription.model_validate(self.resources[uri])
 
     def delete_subscription(self, uri):
         if not uri.startswith("/"):
@@ -65,6 +65,10 @@ class FakeBmc:
     delete = delete_subscription
 
     def get_raw(self, uri):
+        if uri == self.collection:
+            return {"Members": [{"@odata.id": key} for key in self.resources]}
+        if uri in self.resources:
+            return dict(self.resources[uri])
         assert uri == "/action-info", "An existing case must not poll tasks or add receiver checks"
         return {"Parameters": [{"Name": "MessageId", "Required": True}]}
 
@@ -117,13 +121,99 @@ def test_query_only_reads_an_existing_subscription(monkeypatch):
     assert not bmc.created and not bmc.deleted
 
 
-def test_empty_query_keeps_original_precondition(monkeypatch):
+def test_empty_query_prepares_and_cleans_its_subscription(monkeypatch):
     bmc = FakeBmc()
     bmc.resources.clear()
     case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
     case.run_test()
+    assert case.command_check_result == "PASS"
+    assert len(bmc.created) == 1
+    assert bmc.deleted == [bmc.collection + "/test"]
+    assert not bmc.resources
+
+
+def test_query_failure_still_cleans_temporary_subscription(monkeypatch):
+    bmc = FakeBmc()
+    bmc.resources.clear()
+    bmc.get_subscription = Mock(side_effect=RedfishException(500, "query failed"))
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
     assert case.command_check_result == "FAIL"
-    assert not bmc.created and not bmc.deleted
+    assert not bmc.resources
+    bmc.close.assert_called_once()
+
+
+def test_partial_create_failure_still_cleans_temporary_subscription(monkeypatch):
+    bmc = FakeBmc()
+    bmc.resources.clear()
+    subscribe = bmc.subscribe
+
+    def create_then_fail(*args, **kwargs):
+        subscribe(*args, **kwargs)
+        raise RedfishException(201, "response parsing failed")
+
+    bmc.subscribe = create_then_fail
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
+    assert case.command_check_result == "FAIL"
+    assert not bmc.resources
+    assert bmc.deleted == [bmc.collection + "/test"]
+
+
+def test_create_rejection_is_a_failure(monkeypatch):
+    bmc = FakeBmc()
+    bmc.resources.clear()
+    bmc.subscribe = Mock(side_effect=RedfishException(400, "rejected"))
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
+    assert case.command_check_result == "FAIL"
+    assert not bmc.resources and not bmc.deleted
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_cleanup_failure_is_a_failure(monkeypatch, raises):
+    bmc = FakeBmc()
+    bmc.resources.clear()
+    bmc.delete_subscription = Mock(side_effect=RedfishException(500, "delete failed") if raises else None)
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
+    assert case.command_check_result == "FAIL"
+    assert bmc.collection + "/test" in bmc.resources
+
+
+def test_cleanup_preserves_unrelated_concurrent_subscription(monkeypatch):
+    bmc = FakeBmc()
+    other = dict(bmc.resources[bmc.collection + "/existing"])
+    bmc.resources.clear()
+    subscribe = bmc.subscribe
+
+    def create_with_concurrent_subscription(*args, **kwargs):
+        result = subscribe(*args, **kwargs)
+        bmc.resources[bmc.collection + "/existing"] = other
+        return result
+
+    bmc.subscribe = create_with_concurrent_subscription
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
+    assert case.command_check_result == "PASS"
+    assert bmc.resources == {bmc.collection + "/existing": other}
+    assert bmc.deleted == [bmc.collection + "/test"]
+
+
+def test_empty_post_response_recovers_the_owned_uri(monkeypatch):
+    bmc = FakeBmc()
+    bmc.resources.clear()
+    subscribe = bmc.subscribe
+
+    def create_without_representation(*args, **kwargs):
+        subscribe(*args, **kwargs)
+        return Subscription.model_construct()
+
+    bmc.subscribe = create_without_representation
+    case = make_case(monkeypatch, "event_004_get_subscription", "Event004GetSubscription", bmc)
+    case.run_test()
+    assert case.command_check_result == "PASS"
+    assert not bmc.resources
 
 
 def test_positive_only_checks_request_acceptance(monkeypatch):
